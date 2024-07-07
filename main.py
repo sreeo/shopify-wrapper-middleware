@@ -4,6 +4,7 @@ from pydantic import BaseModel, HttpUrl
 from typing import List, Optional
 import httpx
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -131,6 +132,54 @@ async def get_product_details(product_id: int):
             variant["inventory_quantity"] = inventory_level
 
         return ProductDetails(**product_data)
+
+
+def extract_product_id_from_url(url: str) -> Optional[int]:
+    # Pattern to match various forms of Shopify product URLs
+    patterns = [
+        r'/products/([^/]+)',  # Matches /products/product-handle
+        # Matches /products/product-handle/1234567890
+        r'/products/([^/]+)/(\d+)',
+        r'variant=(\d+)',  # Matches variant query parameter
+        r'product/(\d+)'  # Matches /product/1234567890
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            # If it's a numeric ID, return it
+            if match.group(1).isdigit():
+                return int(match.group(1))
+            # If it's a handle, we need to query the API to get the ID
+            else:
+                return get_product_id_from_handle(match.group(1))
+
+    return None
+
+
+async def get_product_id_from_handle(handle: str) -> Optional[int]:
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    url = f"{SHOPIFY_SHOP_URL}/admin/api/2023-04/products.json?handle={handle}"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers)
+        if response.status_code == 200:
+            products = response.json().get("products", [])
+            if products:
+                return products[0]["id"]
+    return None
+
+
+@app.get("/product-by-url")
+async def get_product_by_url(url: str):
+    product_id = extract_product_id_from_url(url)
+    if product_id is None:
+        raise HTTPException(
+            status_code=400, detail="Unable to extract product ID from URL")
+    return await get_product_details(product_id)
 
 if __name__ == "__main__":
     import uvicorn
