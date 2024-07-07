@@ -1,7 +1,7 @@
 # main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
-from typing import List, Optional
+from typing import List, Optional, Dict
 import httpx
 import os
 import re
@@ -66,6 +66,10 @@ class ProductsResponse(BaseModel):
     products: List[Product]
 
 
+class DetailedProductsResponse(BaseModel):
+    products: List[ProductDetails]
+
+
 @app.get("/products",)
 async def get_products():
     if not SHOPIFY_SHOP_URL or not SHOPIFY_ACCESS_TOKEN:
@@ -85,6 +89,71 @@ async def get_products():
                             detail="Failed to fetch products from Shopify")
 # return response.json()
     return ProductsResponse(**response.json())
+
+
+async def fetch_inventory_levels(client: httpx.AsyncClient, variant_ids: List[int], headers: Dict[str, str]) -> Dict[int, Dict[str, int]]:
+    inventory_url = f"{
+        SHOPIFY_SHOP_URL}/admin/api/2023-04/inventory_levels.json?inventory_item_ids={','.join(map(str, variant_ids))}"
+    inventory_response = await client.get(inventory_url, headers=headers)
+
+    if inventory_response.status_code != 200:
+        raise HTTPException(status_code=inventory_response.status_code,
+                            detail="Failed to fetch inventory levels from Shopify")
+
+    inventory_levels = {}
+    for item in inventory_response.json()["inventory_levels"]:
+        inventory_levels[item["inventory_item_id"]] = {
+            "available": item["available"],
+            "inventory_quantity": item["available"]
+        }
+    return inventory_levels
+
+
+@app.get("/detailed-products", response_model=DetailedProductsResponse)
+async def get_detailed_products():
+    if not SHOPIFY_SHOP_URL or not SHOPIFY_ACCESS_TOKEN:
+        raise HTTPException(
+            status_code=500, detail="Shopify credentials not configured")
+
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    all_products = []
+    next_url = f"{SHOPIFY_SHOP_URL}/admin/api/2023-04/products.json"
+
+    async with httpx.AsyncClient() as client:
+        while next_url:
+            response = await client.get(next_url, headers=headers)
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code, detail="Failed to fetch products from Shopify")
+
+            products_data = response.json()["products"]
+
+            # Collect all variant IDs
+            all_variant_ids = [variant["inventory_item_id"]
+                               for product in products_data for variant in product["variants"]]
+
+            # Fetch inventory levels for all variants
+            inventory_levels = await fetch_inventory_levels(client, all_variant_ids, headers)
+
+            # Process each product
+            for product in products_data:
+                for variant in product["variants"]:
+                    inventory_item_id = variant["inventory_item_id"]
+                    inventory_info = inventory_levels.get(
+                        inventory_item_id, {"available": 0, "inventory_quantity": 0})
+                    quantity = inventory_info["inventory_quantity"] or 0
+
+                    variant["available"] = quantity > 0
+                    variant["inventory_quantity"] = quantity
+                all_products.append(ProductDetails(**product))
+
+            next_url = response.links.get("next", {}).get("url")
+
+    return DetailedProductsResponse(products=all_products)
 
 
 @app.get("/products/{product_id}", response_model=ProductDetails)
