@@ -126,10 +126,9 @@ async def get_product_details(product_id: int):
         # Update variants with availability and inventory quantity
         for variant in product_data["variants"]:
             inventory_item_id = variant["inventory_item_id"]
-            variant["available"] = inventory_levels.get(
-                inventory_item_id, 0) > 0
-            variant["inventory_quantity"] = inventory_levels.get(
-                inventory_item_id, 0)
+            inventory_level = inventory_levels.get(inventory_item_id) or 0
+            variant["available"] = inventory_level > 0
+            variant["inventory_quantity"] = inventory_level
 
         return ProductDetails(**product_data)
 
